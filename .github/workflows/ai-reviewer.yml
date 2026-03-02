@@ -1,0 +1,122 @@
+name: AI Reviewer
+
+on:
+  repository_dispatch:
+    types: [start-review]
+
+jobs:
+  review:
+    name: Generate AI Review
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read paper files
+        id: read_paper
+        run: |
+          PAPER_CONTENT=""
+          for f in paper/*; do
+            if [ -f "$f" ]; then
+              PAPER_CONTENT="${PAPER_CONTENT}
+=== $f ===
+$(cat "$f")"
+            fi
+          done
+          # Store as a multi-line env variable
+          {
+            echo "PAPER_CONTENT<<EOF_PAPER_CONTENT"
+            echo "$PAPER_CONTENT"
+            echo "EOF_PAPER_CONTENT"
+          } >> "$GITHUB_ENV"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Call LLM API and save review
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          PAPER_CONTENT: ${{ env.PAPER_CONTENT }}
+        run: |
+          python - <<'PYEOF'
+          import os
+          import json
+          import urllib.request
+          import urllib.error
+
+          api_key = os.environ["LLM_API_KEY"]
+          paper_content = os.environ["PAPER_CONTENT"]
+
+          prompt = (
+              "You are a rigorous academic peer reviewer. "
+              "Please provide a structured critique of the following paper. "
+              "Your review should cover:\n"
+              "1. Summary\n"
+              "2. Strengths\n"
+              "3. Weaknesses\n"
+              "4. Suggestions for improvement\n"
+              "5. Overall recommendation (Accept / Minor Revision / Major Revision / Reject)\n\n"
+              f"--- PAPER START ---\n{paper_content}\n--- PAPER END ---"
+          )
+
+          payload = json.dumps({
+              "model": "gpt-4o",
+              "messages": [{"role": "user", "content": prompt}],
+              "temperature": 0.3,
+          }).encode()
+
+          req = urllib.request.Request(
+              "https://api.openai.com/v1/chat/completions",
+              data=payload,
+              headers={
+                  "Content-Type": "application/json",
+                  "Authorization": f"Bearer {api_key}",
+              },
+              method="POST",
+          )
+
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  data = json.loads(resp.read().decode())
+          except urllib.error.HTTPError as exc:
+              body = exc.read().decode(errors="replace")
+              raise SystemExit(f"LLM API request failed ({exc.code}): {body}") from exc
+          except urllib.error.URLError as exc:
+              raise SystemExit(f"LLM API connection error: {exc.reason}") from exc
+
+          choices = data.get("choices")
+          if not choices or not isinstance(choices, list):
+              raise SystemExit(f"Unexpected LLM API response structure: {data}")
+
+          review_text = choices[0]["message"]["content"]
+
+          with open("/tmp/review.md", "w") as fh:
+              fh.write(review_text)
+
+          print("Review written to /tmp/review.md")
+          PYEOF
+
+      - name: Ensure ai-reviewer label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "ai-reviewer" \
+            --description "Issue created by the AI Reviewer bot" \
+            --color "0075ca" \
+            --repo "${{ github.repository }}" \
+          || true
+
+      - name: Create review issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "AI Review: ${{ github.event.client_payload.paper_title || 'Paper Review' }}" \
+            --body-file /tmp/review.md \
+            --label "ai-reviewer" \
+            --repo "${{ github.repository }}"
