@@ -53,15 +53,29 @@ jobs:
             --pdf-engine=xelatex \
             -o ${{ steps.vars.outputs.output_dir }}/paper.pdf
 
-      - name: Commit and push generated files
+      - name: Commit and push generated files to gh-pages
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ${{ steps.vars.outputs.output_dir }}/paper.html \
-                  ${{ steps.vars.outputs.output_dir }}/paper.pdf
+          OUTPUT_DIR="${{ steps.vars.outputs.output_dir }}"
+          # Stash generated files before switching branches
+          cp "${OUTPUT_DIR}/paper.html" "${{ runner.temp }}/paper.html"
+          cp "${OUTPUT_DIR}/paper.pdf"  "${{ runner.temp }}/paper.pdf"
+          # Fetch gh-pages branch (create orphan if absent)
+          if git ls-remote --exit-code --heads origin gh-pages; then
+            git fetch origin gh-pages
+            git checkout gh-pages
+          else
+            git checkout --orphan gh-pages
+            git rm -rf .
+          fi
+          mkdir -p "${OUTPUT_DIR}"
+          cp "${{ runner.temp }}/paper.html" "${OUTPUT_DIR}/paper.html"
+          cp "${{ runner.temp }}/paper.pdf"  "${OUTPUT_DIR}/paper.pdf"
+          git add "${OUTPUT_DIR}/paper.html" "${OUTPUT_DIR}/paper.pdf"
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "ci: build paper in ${{ steps.vars.outputs.output_dir }} mode [skip ci]"
-            git push
+            git commit -m "ci: build paper in ${OUTPUT_DIR} mode [skip ci]"
+            git push origin gh-pages
           fi
